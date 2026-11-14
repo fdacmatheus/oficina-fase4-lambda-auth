@@ -1,0 +1,94 @@
+name: CI/CD · Lambda de autenticação
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  NODE_VERSION: 22
+
+permissions:
+  contents: read
+
+jobs:
+  qualidade:
+    name: Lint, testes, segredos e build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # o gitleaks varre o historico
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: ESLint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Testes com cobertura (minimo 95%)
+        run: pnpm test:cov
+
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Empacotar as funcoes
+        run: pnpm package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambdas
+          path: build/*.zip
+          retention-days: 1
+
+  # As funcoes sao criadas pelo repositorio oficina-fase4-infra (com codigo
+  # provisorio); aqui so o codigo e publicado. Isso evita a dependencia
+  # circular entre o authorizer do gateway e esta Lambda.
+  deploy:
+    name: Publicar codigo nas Lambdas
+    needs: qualidade
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && vars.DEPLOY_ENABLED == 'true'
+    environment: producao
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lambdas
+          path: build
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Atualizar o codigo das funcoes
+        run: |
+          for f in token authorizer; do
+            aws lambda update-function-code --function-name "oficina-auth-$f" \
+              --zip-file "fileb://build/$f.zip" --publish --query 'Version' --output text
+            aws lambda wait function-updated --function-name "oficina-auth-$f"
+          done
+
+      - name: Smoke test do authorizer (token invalido deve ser negado)
+        run: |
+          aws lambda invoke --function-name oficina-auth-authorizer \
+            --payload '{"headers":{"authorization":"Bearer invalido"},"routeKey":"GET /smoke","requestContext":{"requestId":"smoke"}}' \
+            --cli-binary-format raw-in-base64-out /tmp/r.json >/dev/null
+          cat /tmp/r.json
+          grep -q '"isAuthorized":false' /tmp/r.json
