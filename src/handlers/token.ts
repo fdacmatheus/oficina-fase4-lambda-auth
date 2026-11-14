@@ -3,7 +3,7 @@ import type {
   APIGatewayProxyResultV2,
 } from 'aws-lambda';
 import jwt from 'jsonwebtoken';
-import { isCpfValido, apenasDigitos, mascararCpf } from '../domain/cpf';
+import { isCpfValido, mascararCpf } from '../domain/cpf';
 import { CpfInvalidoError, ClienteNaoEncontradoError } from '../domain/erros';
 import { buscarPorDocumento } from '../infrastructure/clientes.repository';
 import { obterSegredoJwt } from '../infrastructure/segredos';
